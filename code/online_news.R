@@ -3,7 +3,9 @@ library(h2o)
 
 my_seed <- 20210305
 
-h2o.init()
+#h2o.shutdown()
+#h2o.init()
+h2o.init(min_mem_size='100G', max_mem_size='200G')
 h2o.removeAll()
 orig_data_train <- read_csv("data/train.csv")
 orig_data_test <- read_csv("data/test.csv")
@@ -70,6 +72,7 @@ rf_grid <- h2o.grid(
   seed = my_seed,
   hyper_params = rf_params
 )
+# parallelism = 0 #auto
 
 h2o.getGrid(rf_grid@grid_id, "mse")
 best_rf <- h2o.getModel(
@@ -133,4 +136,6 @@ h2oSubmittion(best_gbm, "best_gbm", h2o_data_test)
 
 ### 4, A neural network prediction after parameter tuning.
 
-###############################################################################################################################################################
+############################################################################################################
+h2o.mse(h2o.performance(best_rf,data_test))
+h2o.mse(h2o.performance(best_gbm,data_test))
