@@ -1,5 +1,6 @@
 library(tidyverse)
 library(h2o)
+library(data.table)
 
 my_seed <- 20210305
 
@@ -7,12 +8,15 @@ my_seed <- 20210305
 #h2o.init()
 h2o.init(min_mem_size='100G', max_mem_size='200G')
 h2o.removeAll()
+h2o.show_progress()
+
+
 orig_data_train <- read_csv("data/train.csv")
 orig_data_test <- read_csv("data/test.csv")
 
 ###############################################################################################################################################################
 # EDA
-## TODO:
+
 
 skimr::skim(orig_data_train)
 
@@ -25,16 +29,41 @@ factors <- c('data_channel_is_lifestyle', 'data_channel_is_entertainment', 'data
 orig_data_train[,factors] <- lapply(orig_data_train[,factors], factor)
 orig_data_test[,factors] <- lapply(orig_data_test[,factors], factor)
 
+
+LogTransformSkewedVars <- function(df, treshold, exclude){
+  library(data.table)
+  library(moments) # for skewness
+  
+  # Calculate skewness
+  numerics <- names(df)[sapply(df, is.numeric)]
+  skewness_of_vars <- t(as.data.frame(lapply(df[,numerics], skewness)))
+  
+  # Get skewed vars
+  skewness_of_vars <- as.data.table(skewness_of_vars, keep.rownames=TRUE)
+  skewed_vars <- skewness_of_vars[V1>0.4]$rn
+  
+  # remove var to exclude
+  skewed_vars <- skewed_vars[skewed_vars!=exclude]
+  
+  df[,skewed_vars] <- lapply(df[,skewed_vars], function(x) log(x+1))
+  return(df)
+}
+
+orig_data_train <- LogTransformSkewedVars(orig_data_train, 0.4, 'is_popular')
+orig_data_test <- LogTransformSkewedVars(orig_data_test, 0.4, 'is_popular')
+
+#TODO: article ID numeric
+
 ###############################################################################################################################################################
 # H2O data
 
 h2o_data_train <- as.h2o(orig_data_train)
 h2o_data_test <- as.h2o(orig_data_test)
 
-
-splitted_data <- h2o.splitFrame(h2o_data_train, ratios = 0.75, seed = my_seed)
-data_train <- splitted_data[[1]]
-data_test <- splitted_data[[2]]
+data_train <- h2o_data_train
+#splitted_data <- h2o.splitFrame(h2o_data_train, ratios = 0.75, seed = my_seed)
+#data_train <- splitted_data[[1]]
+#data_test <- splitted_data[[2]]
 
 y <- "is_popular"
 X <- setdiff(names(h2o_data_train), y)
@@ -42,7 +71,7 @@ X <- setdiff(names(h2o_data_train), y)
 
 h2oSubmittion <- function(model, name, test_data){
   to_submit <- data.table(
-    article_id = as.numeric(orig_data_test$article_id),
+    article_id = as.numeric(as.character(orig_data_test$article_id)),
     score = as.data.frame(h2o.predict(object = model, newdata = test_data))
   )
   colnames(to_submit) <- c("article_id", "score")
@@ -53,14 +82,15 @@ h2oSubmittion <- function(model, name, test_data){
 
 ###############################################################################################################################################################
 ### 1, A linear model prediction after parameter tuning
+#TODO
 
 ###############################################################################################################################################################
 ### 2, A random forest prediction after parameter tuning
-
+#
 rf_params <- list(
-  ntrees = c(10, 50, 100, 300, 500),
-  mtries = c(2, 4, 6, 8, 9),
-  sample_rate = c(0.2, 0.632, 1),
+  ntrees = c(100, 300),
+  mtries = c(4, 6, 7, 8),
+  sample_rate = c(1),
   max_depth = c(10, 20)
 )
 
@@ -76,11 +106,11 @@ rf_grid <- h2o.grid(
 
 h2o.getGrid(rf_grid@grid_id, "mse")
 best_rf <- h2o.getModel(
-  h2o.getGrid(rf_grid@grid_id, sort_by = "mse", decreasing = TRUE)@model_ids[[1]]
+  h2o.getGrid(rf_grid@grid_id, sort_by = "mse")@model_ids[[1]]
 )
-saveRDS(best_rf, "models/best_rf")
+saveRDS(best_rf, "models/data_best_rf")
 
-best_rf <- readRDS("models/best_rf")
+best_rf <- readRDS("models/data_best_rf")
 
 
 rf_performance_summary <- h2o.getGrid(rf_grid@grid_id, "mse")@summary_table %>%
@@ -92,19 +122,20 @@ ggplot(rf_performance_summary, aes(ntrees, mse, color = factor(mtries))) +
   facet_grid(max_depth ~ sample_rate, labeller = label_both) +
   theme(legend.position = "bottom") +
   labs(color = "mtry")
-ggsave("plots/rf_summary_plot.png")
+ggsave("plots/data_rf_summary_plot.png")
 
-h2oSubmittion(best_rf, "best_rf", h2o_data_test)
+h2oSubmittion(best_rf, "data_best_rf", h2o_data_test)
+
 
 
 ###############################################################################################################################################################
 ### 3, A gradient boosting prediction after parameter tuning
 
 gbm_params <- list(
-  learn_rate = c(0.01, 0.05, 0.1, 0.3),  # default: 0.1
-  ntrees = c(10, 50, 100, 300, 500),
+  learn_rate = c(0.05, 0.1, 0.3),  # default: 0.1
+  ntrees = c(50, 100, 300),
   max_depth = c(2, 5),
-  sample_rate = c(0.2, 0.5, 0.8, 1)
+  sample_rate = c(0.2, 0.5, 1)
 )
 gbm_grid <- h2o.grid(
   "gbm", x = X, y = y,
@@ -116,26 +147,125 @@ gbm_grid <- h2o.grid(
 )
 
 best_gbm <- h2o.getModel(
-  h2o.getGrid(gbm_grid@grid_id, sort_by = "auc", decreasing = TRUE)@model_ids[[1]])
-gbm_performance_summary <- h2o.getGrid(gbm_grid@grid_id, "auc")@summary_table %>%
+  h2o.getGrid(gbm_grid@grid_id, sort_by = "mse")@model_ids[[1]])
+gbm_performance_summary <- h2o.getGrid(gbm_grid@grid_id, "mse")@summary_table %>%
   as_tibble() %>%
-  mutate(across(c("auc", names(gbm_params)), as.numeric))
-ggplot(gbm_performance_summary, aes(ntrees, auc, color = factor(learn_rate))) +
+  mutate(across(c("mse", names(gbm_params)), as.numeric))
+ggplot(gbm_performance_summary, aes(ntrees, mse, color = factor(learn_rate))) +
   geom_line() +
   facet_grid(max_depth ~ sample_rate, labeller = label_both) +
   theme(legend.position = "bottom") +
   labs(color = "learning rate")
 
-ggsave("plots/gbm_summary_plot.png")
+ggsave("plots/data_gbm_summary_plot.png")
 
-saveRDS(best_gbm, "models/best_gbm")
+saveRDS(best_gbm, "models/data_best_gbm")
 
-h2oSubmittion(best_gbm, "best_gbm", h2o_data_test)
+best_gbb <- readRDS("models/data_best_gbm")
 
-#h2o.auc(best_gbm, xval = TRUE)
+h2oSubmittion(best_gbm, "data_best_gbm", h2o_data_test)
 
-### 4, A neural network prediction after parameter tuning.
+###############################################################################################################################################################
+###  GBM clever tuning#
+#TODO try this, takes lot time!
+gbm_params <- list(
+  learn_rate = c(0.05, 0.01, 0.1),  # default: 0.1
+  ntrees = c(100, 500),
+  max_depth = c(2, 5),
+  sample_rate = c(0.2, 0.5, 1)
+)
+gbm_grid <- h2o.grid(
+  "gbm", x = X, y = y,
+  grid_id = "gbm",
+  training_frame = data_train,
+  nfolds = 5,
+  seed = my_seed,
+  hyper_params = gbm_params
+)
+
+best_gbm_tuned <- h2o.getModel(
+  h2o.getGrid(gbm_grid@grid_id, sort_by = "mse")@model_ids[[1]])
+gbm_performance_summary <- h2o.getGrid(gbm_grid@grid_id, "mse")@summary_table %>%
+  as_tibble() %>%
+  mutate(across(c("mse", names(gbm_params)), as.numeric))
+ggplot(gbm_performance_summary, aes(ntrees, mse, color = factor(learn_rate))) +
+  geom_line() +
+  facet_grid(max_depth ~ sample_rate, labeller = label_both) +
+  theme(legend.position = "bottom") +
+  labs(color = "learning rate")
+
+ggsave("plots/data_best_gbm_tuned_summary_plot.png")
+
+saveRDS(best_gbm_tuned, "models/data_best_gbm_tuned")
+
+best_gbm_tuned <- readRDS("models/data_best_gbm_tuned")
+
+h2oSubmittion(best_gbm_tuned, "data_best_gbm_tuned", h2o_data_test)
 
 ############################################################################################################
-h2o.mse(h2o.performance(best_rf,data_test))
-h2o.mse(h2o.performance(best_gbm,data_test))
+#XGBOOST SIMPLE
+
+#titanic_xgb <- h2o.xgboost(x = X,
+#                           y = y,
+#                           training_frame = data_train,
+#                           validation_frame = data_test,
+#                           booster = "dart",
+#                           normalize_type = "tree",
+#                           seed = my_seed)
+#
+#h2o.mse(h2o.performance(titanic_xgb,data_test))
+#
+#h2oSubmittion(titanic_xgb, "simple_xgboost", h2o_data_test)
+
+
+############################################################################################################
+#XGBOOST
+
+xgboost_params <- list(
+  learn_rate = c(0.1, 0.3),  # same as "eta", default: 0.3
+  ntrees = c(50, 100, 300),
+  max_depth = c(2, 5),
+  gamma = c(0, 1, 2),  # regularization parameter
+  sample_rate = c(0.5, 1)
+)
+
+xgboost_grid <- h2o.grid(
+  "xgboost", x = X, y = y,
+  grid_id = "xgboost",
+  training_frame = data_train,
+  nfolds = 5,
+  seed = my_seed,
+  hyper_params = xgboost_params
+)
+
+best_xgboost <- h2o.getModel(
+  h2o.getGrid(xgboost_grid@grid_id, sort_by = "mse")@model_ids[[1]]
+)
+
+xgboost_performance_summary <- h2o.getGrid(xgboost_grid@grid_id, "mse")@summary_table %>%
+  as_tibble() %>%
+  mutate(across(c("mse", names(xgboost_params)), as.numeric))
+ggplot(xgboost_performance_summary, aes(ntrees, mse, color = factor(learn_rate))) +
+  geom_line() +
+  facet_grid(max_depth ~ sample_rate, labeller = label_both) +
+  theme(legend.position = "bottom") +
+  labs(color = "learning rate")
+
+ggsave("plots/data_xgboost_summary_plot.png")
+
+saveRDS(best_xgboost, "models/data_best_xgboost")
+
+best_xgboost <- readRDS("models/data_best_xgboost")
+
+h2oSubmittion(best_xgboost, "data_best_xgboost", h2o_data_test)
+h2o.mse(h2o.performance(best_xgboost,data_test))
+
+### 4, A neural network prediction after parameter tuning.
+#TODO:
+
+############################################################################################################
+#h2o.mse(h2o.performance(best_rf,data_test))
+#h2o.mse(h2o.performance(best_gbm,data_test))
+
+
+
