@@ -24,7 +24,7 @@ skimr::skim(orig_data_train)
 factors <- c('data_channel_is_lifestyle', 'data_channel_is_entertainment', 'data_channel_is_bus', 'data_channel_is_socmed',
              'data_channel_is_tech', 'data_channel_is_world', 
              'weekday_is_monday', 'weekday_is_tuesday', 'weekday_is_wednesday', 'weekday_is_thursday', 'weekday_is_friday',
-             'weekday_is_saturday', 'weekday_is_sunday', 'is_weekend', 'article_id')#, 'is_popular')
+             'weekday_is_saturday', 'weekday_is_sunday', 'is_weekend')#, 'article_id')#, 'is_popular')
 
 orig_data_train[,factors] <- lapply(orig_data_train[,factors], factor)
 orig_data_test[,factors] <- lapply(orig_data_test[,factors], factor)
@@ -52,7 +52,6 @@ LogTransformSkewedVars <- function(df, treshold, exclude){
 orig_data_train <- LogTransformSkewedVars(orig_data_train, 0.4, 'is_popular')
 orig_data_test <- LogTransformSkewedVars(orig_data_test, 0.4, 'is_popular')
 
-#TODO: article ID numeric
 
 ###############################################################################################################################################################
 # H2O data
@@ -74,6 +73,7 @@ h2oSubmittion <- function(model, name, test_data){
     article_id = as.numeric(as.character(orig_data_test$article_id)),
     score = as.data.frame(h2o.predict(object = model, newdata = test_data))
   )
+  to_submit <- to_submit[,1:2]
   colnames(to_submit) <- c("article_id", "score")
   
   write.csv(to_submit, paste0("submissions/",name,".csv"), row.names=FALSE)
@@ -82,7 +82,21 @@ h2oSubmittion <- function(model, name, test_data){
 
 ###############################################################################################################################################################
 ### 1, A linear model prediction after parameter tuning
-#TODO
+lasso <- h2o.glm(
+  X, y,
+  training_frame = data_train,
+  model_id = "lasso",
+  family = "binomial",
+  alpha = 1,
+  lambda_search = TRUE,
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE 
+)
+saveRDS(lasso, "models/lasso")
+
+lasso <- readRDS("models/lasso")
+h2oSubmittion(lasso, "lasso", h2o_data_test)
 
 ###############################################################################################################################################################
 ### 2, A random forest prediction after parameter tuning
@@ -108,9 +122,9 @@ h2o.getGrid(rf_grid@grid_id, "mse")
 best_rf <- h2o.getModel(
   h2o.getGrid(rf_grid@grid_id, sort_by = "mse")@model_ids[[1]]
 )
-saveRDS(best_rf, "models/data_best_rf")
+saveRDS(best_rf, "models/id_data_best_rf")
 
-best_rf <- readRDS("models/data_best_rf")
+best_rf <- readRDS("models/id_data_best_rf")
 
 
 rf_performance_summary <- h2o.getGrid(rf_grid@grid_id, "mse")@summary_table %>%
@@ -122,9 +136,9 @@ ggplot(rf_performance_summary, aes(ntrees, mse, color = factor(mtries))) +
   facet_grid(max_depth ~ sample_rate, labeller = label_both) +
   theme(legend.position = "bottom") +
   labs(color = "mtry")
-ggsave("plots/data_rf_summary_plot.png")
+ggsave("plots/id_data_rf_summary_plot.png")
 
-h2oSubmittion(best_rf, "data_best_rf", h2o_data_test)
+h2oSubmittion(best_rf, "id_data_best_rf", h2o_data_test)
 
 
 
@@ -157,13 +171,13 @@ ggplot(gbm_performance_summary, aes(ntrees, mse, color = factor(learn_rate))) +
   theme(legend.position = "bottom") +
   labs(color = "learning rate")
 
-ggsave("plots/data_gbm_summary_plot.png")
+ggsave("plots/id_data_gbm_summary_plot.png")
 
-saveRDS(best_gbm, "models/data_best_gbm")
+saveRDS(best_gbm, "models/id_data_best_gbm")
 
-best_gbb <- readRDS("models/data_best_gbm")
+best_gbb <- readRDS("models/id_data_best_gbm")
 
-h2oSubmittion(best_gbm, "data_best_gbm", h2o_data_test)
+h2oSubmittion(best_gbm, "id_data_best_gbm", h2o_data_test)
 
 ###############################################################################################################################################################
 ###  GBM clever tuning#
@@ -194,13 +208,13 @@ ggplot(gbm_performance_summary, aes(ntrees, mse, color = factor(learn_rate))) +
   theme(legend.position = "bottom") +
   labs(color = "learning rate")
 
-ggsave("plots/data_best_gbm_tuned_summary_plot.png")
+ggsave("plots/id_data_best_gbm_tuned_summary_plot.png")
 
-saveRDS(best_gbm_tuned, "models/data_best_gbm_tuned")
+saveRDS(best_gbm_tuned, "models/id_data_best_gbm_tuned")
 
-best_gbm_tuned <- readRDS("models/data_best_gbm_tuned")
+best_gbm_tuned <- readRDS("models/id_data_best_gbm_tuned")
 
-h2oSubmittion(best_gbm_tuned, "data_best_gbm_tuned", h2o_data_test)
+h2oSubmittion(best_gbm_tuned, "id_data_best_gbm_tuned", h2o_data_test)
 
 ############################################################################################################
 #XGBOOST SIMPLE
@@ -251,21 +265,40 @@ ggplot(xgboost_performance_summary, aes(ntrees, mse, color = factor(learn_rate))
   theme(legend.position = "bottom") +
   labs(color = "learning rate")
 
-ggsave("plots/data_xgboost_summary_plot.png")
+ggsave("plots/id_data_xgboost_summary_plot.png")
 
-saveRDS(best_xgboost, "models/data_best_xgboost")
+saveRDS(best_xgboost, "models/id_data_best_xgboost")
 
-best_xgboost <- readRDS("models/data_best_xgboost")
+best_xgboost <- readRDS("models/id_data_best_xgboost")
 
-h2oSubmittion(best_xgboost, "data_best_xgboost", h2o_data_test)
-h2o.mse(h2o.performance(best_xgboost,data_test))
-
-### 4, A neural network prediction after parameter tuning.
-#TODO:
+h2oSubmittion(best_xgboost, "id_data_best_xgboost", h2o_data_test)
 
 ############################################################################################################
-#h2o.mse(h2o.performance(best_rf,data_test))
-#h2o.mse(h2o.performance(best_gbm,data_test))
+### 4, A neural network prediction after parameter tuning.
+nn1 <- h2o.deeplearning(
+  X, y,
+  training_frame = data_train,
+  model_id = "nn1",
+  hidden = c(32),
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+saveRDS(nn1, "models/nn1")
 
+nn1 <- readRDS("models/nn1")
+h2oSubmittion(nn1, "nn1", h2o_data_test)
 
+nn2 <- h2o.deeplearning(
+  X, y,
+  training_frame = data_train,
+  model_id = "nn2",
+  hidden = c(32, 8),
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+saveRDS(nn2, "models/nn2")
 
+nn2 <- readRDS("models/nn2")
+h2oSubmittion(nn2, "nn2", h2o_data_test)
