@@ -1,3 +1,15 @@
+---
+title: "Kaggle competition models"
+author: "David Utassy"
+date: "4/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r includes, include=TRUE, results=F, warning=F, comment=F, message=F}
 library(tidyverse)
 library(h2o)
 library(data.table)
@@ -9,14 +21,50 @@ my_seed <- 20210305
 h2o.init(min_mem_size='100G', max_mem_size='200G')
 h2o.removeAll()
 h2o.show_progress()
+```
 
+## EDA
 
-orig_data_train <- read_csv("data/train.csv")
-orig_data_test <- read_csv("data/test.csv")
+In the first code snippet, here are my two helper functions that I wrote:
+- automatically log transform all the skewed numeric variables
+- create a submission file ready for kaggle from H2O predictions
 
-###############################################################################################################################################################
-# EDA
+```{r helpers, include=TRUE, cache=F, message=F, results=F}
+LogTransformSkewedVars <- function(df, treshold, exclude){
+  library(data.table)
+  library(moments) # for skewness
+  
+  # Calculate skewness
+  numerics <- names(df)[sapply(df, is.numeric)]
+  skewness_of_vars <- t(as.data.frame(lapply(df[,numerics], skewness)))
+  
+  # Get skewed vars
+  skewness_of_vars <- as.data.table(skewness_of_vars, keep.rownames=TRUE)
+  skewed_vars <- skewness_of_vars[V1>0.4]$rn
+  
+  # remove var to exclude
+  skewed_vars <- skewed_vars[skewed_vars!=exclude]
+  
+  df[,skewed_vars] <- lapply(df[,skewed_vars], function(x) log(x+1))
+  return(df)
+}
 
+h2oSubmittion <- function(model, name, test_data){
+  to_submit <- data.table(
+    article_id = as.numeric(as.character(orig_data_test$article_id)),
+    score = as.data.frame(h2o.predict(object = model, newdata = test_data))
+  )
+  to_submit <- to_submit[,1:2]
+  colnames(to_submit) <- c("article_id", "score")
+  
+  write.csv(to_submit, paste0("submissions/",name,".csv"), row.names=FALSE)
+}
+```
+
+After the exploration of the data with the skimr package, and some basic histogram plots I realized that the data is kind of clean without missing values. In the following code snippet, I transformed factor variables into factors and used my self-made function to automatically log transform those numeric variables that are skewed. 
+```{r eda, include=TRUE, cache=F, message=F, results=F}
+orig_data_train <- read_csv("../data/train.csv")
+orig_data_test <- read_csv("../data/test.csv")
 
 skimr::skim(orig_data_train)
 
@@ -51,22 +99,20 @@ LogTransformSkewedVars <- function(df, treshold, exclude){
 
 orig_data_train <- LogTransformSkewedVars(orig_data_train, 0.4, 'is_popular')
 orig_data_test <- LogTransformSkewedVars(orig_data_test, 0.4, 'is_popular')
+```
 
-
-###############################################################################################################################################################
-# H2O data
-
+Also, as I was planning to use H2O to train my models, I converted my data into a format that H2O needs. 
+```{r H2Odata, include=TRUE, cache=F, message=F, results=F}
 h2o_data_train <- as.h2o(orig_data_train)
 h2o_data_test <- as.h2o(orig_data_test)
 
-data_train <- h2o_data_train
+data_train <- h2o_data_train # use the whole training data and evaluate only on kaggle
 #splitted_data <- h2o.splitFrame(h2o_data_train, ratios = 0.75, seed = my_seed)
 #data_train <- splitted_data[[1]]
 #data_test <- splitted_data[[2]]
 
 y <- "is_popular"
 X <- setdiff(names(h2o_data_train), y)
-
 
 h2oSubmittion <- function(model, name, test_data){
   to_submit <- data.table(
@@ -78,10 +124,12 @@ h2oSubmittion <- function(model, name, test_data){
   
   write.csv(to_submit, paste0("submissions/",name,".csv"), row.names=FALSE)
 }
+```
 
+## 1, A linear model prediction after parameter tuning
 
-###############################################################################################################################################################
-### 1, A linear model prediction after parameter tuning
+For a linear model I used a GLM to train lasso models with lambda optimization in the following way:
+```{r lin, include=TRUE, cache=F, message=F, results=F, eval=F}
 lasso <- h2o.glm(
   X, y,
   training_frame = data_train,
@@ -97,10 +145,14 @@ saveRDS(lasso, "models/lasso")
 
 lasso <- readRDS("models/lasso")
 h2oSubmittion(lasso, "lasso", h2o_data_test)
+```
 
-###############################################################################################################################################################
-### 2, A random forest prediction after parameter tuning
-#
+## 2, A random forest prediction after parameter tuning
+
+To train the best RF model I can, in the end, I used the following grid search to find the best model according to my previous runs.
+
+Also,  I made some plots on how the different models performed to help my decision on the upcoming attempts.
+```{r rf, include=TRUE, cache=F, message=F, results=F, eval=F}
 rf_params <- list(
   ntrees = c(100, 300),
   mtries = c(4, 6, 7, 8),
@@ -116,16 +168,12 @@ rf_grid <- h2o.grid(
   seed = my_seed,
   hyper_params = rf_params
 )
-# parallelism = 0 #auto
 
 h2o.getGrid(rf_grid@grid_id, "mse")
 best_rf <- h2o.getModel(
   h2o.getGrid(rf_grid@grid_id, sort_by = "mse")@model_ids[[1]]
 )
 saveRDS(best_rf, "models/id_data_best_rf")
-
-best_rf <- readRDS("models/id_data_best_rf")
-
 
 rf_performance_summary <- h2o.getGrid(rf_grid@grid_id, "mse")@summary_table %>%
   as_tibble() %>%
@@ -136,21 +184,33 @@ ggplot(rf_performance_summary, aes(ntrees, mse, color = factor(mtries))) +
   facet_grid(max_depth ~ sample_rate, labeller = label_both) +
   theme(legend.position = "bottom") +
   labs(color = "mtry")
+
 ggsave("plots/id_data_rf_summary_plot.png")
 
+best_rf <- readRDS("models/id_data_best_rf")
+
 h2oSubmittion(best_rf, "id_data_best_rf", h2o_data_test)
+```
 
+## 3, A gradient boosting prediction after parameter tuning
 
+I tried three different attempts under this section:
+- Basic GBM training with grid search
+- GBM after the results of the previous grid search
+- XGBOOST with grid search
 
-###############################################################################################################################################################
-### 3, A gradient boosting prediction after parameter tuning
+Also,  I made some plots on how the different models performed to help my decision on the upcoming attempts.
 
+You can see the code of these models below:
+```{r gbm, include=TRUE, cache=F, message=F, results=F, eval=F}
+# GBM 1
 gbm_params <- list(
   learn_rate = c(0.05, 0.1, 0.3),  # default: 0.1
   ntrees = c(50, 100, 300),
   max_depth = c(2, 5),
   sample_rate = c(0.2, 0.5, 1)
 )
+
 gbm_grid <- h2o.grid(
   "gbm", x = X, y = y,
   grid_id = "gbm",
@@ -179,8 +239,8 @@ best_gbb <- readRDS("models/id_data_best_gbm")
 
 h2oSubmittion(best_gbm, "id_data_best_gbm", h2o_data_test)
 
-###############################################################################################################################################################
-###  GBM clever tuning#
+# GBM 2
+
 gbm_params <- list(
   learn_rate = c(0.05, 0.01, 0.1),  # default: 0.1
   ntrees = c(100, 500),
@@ -215,24 +275,7 @@ best_gbm_tuned <- readRDS("models/id_data_best_gbm_tuned")
 
 h2oSubmittion(best_gbm_tuned, "id_data_best_gbm_tuned", h2o_data_test)
 
-############################################################################################################
-#XGBOOST SIMPLE
-
-#titanic_xgb <- h2o.xgboost(x = X,
-#                           y = y,
-#                           training_frame = data_train,
-#                           validation_frame = data_test,
-#                           booster = "dart",
-#                           normalize_type = "tree",
-#                           seed = my_seed)
-#
-#h2o.mse(h2o.performance(titanic_xgb,data_test))
-#
-#h2oSubmittion(titanic_xgb, "simple_xgboost", h2o_data_test)
-
-
-############################################################################################################
-#XGBOOST
+# XGBOOST
 
 xgboost_params <- list(
   learn_rate = c(0.1, 0.3),  # same as "eta", default: 0.3
@@ -271,9 +314,12 @@ saveRDS(best_xgboost, "models/id_data_best_xgboost")
 best_xgboost <- readRDS("models/id_data_best_xgboost")
 
 h2oSubmittion(best_xgboost, "id_data_best_xgboost", h2o_data_test)
+```
 
-############################################################################################################
-### 4, A neural network prediction after parameter tuning.
+## 4, A neural network prediction after parameter tuning.
+
+As the assignment suggested I run some NN models to predict on this dataset, but as it is well-structured data I did not spend too much time on it as I was not expecting to achieve great results with them. In the following code snippet you can see two NN models, the first with one hidden layer of 32 nodes, and the second one with two hidden layers with 32 and 8 nodes.
+```{r nn, include=TRUE, cache=F, message=F, results=F, eval=F}
 nn1 <- h2o.deeplearning(
   X, y,
   training_frame = data_train,
@@ -301,3 +347,9 @@ saveRDS(nn2, "models/nn2")
 
 nn2 <- readRDS("models/nn2")
 h2oSubmittion(nn2, "nn2", h2o_data_test)
+```
+
+## Evaluation
+
+I can not evaluate my models in this document as I used all my labeled data for training in order to reach better results however I can say that according to my submissions on kaggle the GBM and the Random Forest models performed the best on the first half of the test sample. My best models AUC were within 0.06 range from the leading model in the competition when I am submitting the assignment. I hope that in the final evaluation I will perform great as I tried not to overfit the test sample. 
+
